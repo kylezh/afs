@@ -186,4 +186,260 @@ mod tests {
         storage.remove_dir(id).await.unwrap();
         assert!(!storage.dir_exists(id).await.unwrap());
     }
+
+    #[tokio::test]
+    async fn test_read_file_nonexistent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = LocalStorage::new(tmp.path().to_path_buf());
+        let id = "a1b2c3d4e5f6789012345678abcdef90";
+        storage.init_dir(id).await.unwrap();
+
+        let err = storage.read_file(id, Path::new("no-such-file.txt")).await;
+        assert!(err.is_err());
+        assert!(err.unwrap_err().to_string().contains("failed to read"));
+    }
+
+    #[tokio::test]
+    async fn test_stat_nonexistent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = LocalStorage::new(tmp.path().to_path_buf());
+        let id = "a1b2c3d4e5f6789012345678abcdef90";
+        storage.init_dir(id).await.unwrap();
+
+        let err = storage.stat(id, Path::new("no-such-file.txt")).await;
+        assert!(err.is_err());
+        assert!(err.unwrap_err().to_string().contains("failed to stat"));
+    }
+
+    #[tokio::test]
+    async fn test_list_dir_nonexistent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = LocalStorage::new(tmp.path().to_path_buf());
+        let id = "a1b2c3d4e5f6789012345678abcdef90";
+        storage.init_dir(id).await.unwrap();
+
+        let err = storage.list_dir(id, Path::new("no-such-dir")).await;
+        assert!(err.is_err());
+        assert!(err.unwrap_err().to_string().contains("failed to list dir"));
+    }
+
+    #[tokio::test]
+    async fn test_remove_nonexistent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = LocalStorage::new(tmp.path().to_path_buf());
+        let id = "a1b2c3d4e5f6789012345678abcdef90";
+        storage.init_dir(id).await.unwrap();
+
+        let err = storage.remove(id, Path::new("no-such-file.txt")).await;
+        assert!(err.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_rename_nonexistent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = LocalStorage::new(tmp.path().to_path_buf());
+        let id = "a1b2c3d4e5f6789012345678abcdef90";
+        storage.init_dir(id).await.unwrap();
+
+        let err = storage
+            .rename(id, Path::new("no-such.txt"), Path::new("dest.txt"))
+            .await;
+        assert!(err.is_err());
+        assert!(err.unwrap_err().to_string().contains("failed to rename"));
+    }
+
+    #[tokio::test]
+    async fn test_remove_dir_nonexistent_is_ok() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = LocalStorage::new(tmp.path().to_path_buf());
+        let id = "a1b2c3d4e5f6789012345678abcdef90";
+
+        // remove_dir on non-existent dir should succeed (no-op)
+        storage.remove_dir(id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_write_creates_parent_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = LocalStorage::new(tmp.path().to_path_buf());
+        let id = "a1b2c3d4e5f6789012345678abcdef90";
+        storage.init_dir(id).await.unwrap();
+
+        // Write into a nested path that doesn't exist yet
+        storage
+            .write_file(id, Path::new("deep/nested/file.txt"), b"nested data")
+            .await
+            .unwrap();
+        let data = storage
+            .read_file(id, Path::new("deep/nested/file.txt"))
+            .await
+            .unwrap();
+        assert_eq!(data, b"nested data");
+    }
+
+    #[tokio::test]
+    async fn test_stat_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = LocalStorage::new(tmp.path().to_path_buf());
+        let id = "a1b2c3d4e5f6789012345678abcdef90";
+        storage.init_dir(id).await.unwrap();
+        storage.mkdir(id, Path::new("mydir")).await.unwrap();
+
+        let attr = storage.stat(id, Path::new("mydir")).await.unwrap();
+        assert!(attr.is_dir);
+    }
+
+    #[tokio::test]
+    async fn test_remove_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = LocalStorage::new(tmp.path().to_path_buf());
+        let id = "a1b2c3d4e5f6789012345678abcdef90";
+        storage.init_dir(id).await.unwrap();
+        storage.mkdir(id, Path::new("mydir")).await.unwrap();
+
+        // Remove should handle directory via remove_dir_all
+        storage.remove(id, Path::new("mydir")).await.unwrap();
+        assert!(storage.stat(id, Path::new("mydir")).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_list_dir_with_files_and_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = LocalStorage::new(tmp.path().to_path_buf());
+        let id = "a1b2c3d4e5f6789012345678abcdef90";
+        storage.init_dir(id).await.unwrap();
+
+        storage
+            .write_file(id, Path::new("file1.txt"), b"a")
+            .await
+            .unwrap();
+        storage
+            .write_file(id, Path::new("file2.txt"), b"bb")
+            .await
+            .unwrap();
+        storage.mkdir(id, Path::new("subdir")).await.unwrap();
+
+        let entries = storage.list_dir(id, Path::new("")).await.unwrap();
+        assert_eq!(entries.len(), 3);
+
+        let dir_count = entries.iter().filter(|e| e.is_dir).count();
+        let file_count = entries.iter().filter(|e| !e.is_dir).count();
+        assert_eq!(dir_count, 1);
+        assert_eq!(file_count, 2);
+    }
+
+    #[tokio::test]
+    async fn test_init_dir_failure() {
+        // Use a file as base_path so create_dir_all fails
+        let tmp = tempfile::tempdir().unwrap();
+        let file_path = tmp.path().join("not-a-dir");
+        tokio::fs::write(&file_path, b"blocker").await.unwrap();
+
+        let storage = LocalStorage::new(file_path);
+        let id = "a1b2c3d4e5f6789012345678abcdef90";
+
+        let err = storage.init_dir(id).await;
+        assert!(err.is_err());
+        assert!(err.unwrap_err().to_string().contains("failed to create dir"));
+    }
+
+    #[tokio::test]
+    async fn test_write_file_failure() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = LocalStorage::new(tmp.path().to_path_buf());
+        let id = "a1b2c3d4e5f6789012345678abcdef90";
+        storage.init_dir(id).await.unwrap();
+
+        // Make the dir root read-only so writes fail
+        let dir_root = tmp.path().join("90").join("ef").join(id);
+        let mut perms = std::fs::metadata(&dir_root).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&dir_root, perms.clone()).unwrap();
+
+        let err = storage
+            .write_file(id, Path::new("test.txt"), b"data")
+            .await;
+
+        // Restore permissions for cleanup
+        perms.set_readonly(false);
+        std::fs::set_permissions(&dir_root, perms).unwrap();
+
+        assert!(err.is_err());
+        assert!(err.unwrap_err().to_string().contains("failed to write"));
+    }
+
+    #[tokio::test]
+    async fn test_mkdir_failure() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = LocalStorage::new(tmp.path().to_path_buf());
+        let id = "a1b2c3d4e5f6789012345678abcdef90";
+        storage.init_dir(id).await.unwrap();
+
+        // Create a file where we'd need a directory
+        storage
+            .write_file(id, Path::new("blocker"), b"file")
+            .await
+            .unwrap();
+        let err = storage.mkdir(id, Path::new("blocker/subdir")).await;
+        assert!(err.is_err());
+        assert!(err.unwrap_err().to_string().contains("failed to mkdir"));
+    }
+
+    #[tokio::test]
+    async fn test_remove_dir_failure() {
+        // Use a base path under a file so the dir_root resolves to something unmovable
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = LocalStorage::new(tmp.path().to_path_buf());
+        let id = "a1b2c3d4e5f6789012345678abcdef90";
+        storage.init_dir(id).await.unwrap();
+
+        // Make the dir read-only so remove_dir_all fails
+        let dir_root = tmp
+            .path()
+            .join("90")
+            .join("ef")
+            .join(id);
+
+        // Create a file inside, then make parent non-writable
+        storage
+            .write_file(id, Path::new("keep.txt"), b"data")
+            .await
+            .unwrap();
+        let mut perms = std::fs::metadata(&dir_root).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&dir_root, perms.clone()).unwrap();
+
+        let err = storage.remove_dir(id).await;
+        // Restore permissions for cleanup
+        perms.set_readonly(false);
+        std::fs::set_permissions(&dir_root, perms).unwrap();
+
+        assert!(err.is_err());
+        assert!(err.unwrap_err().to_string().contains("failed to remove dir"));
+    }
+
+    #[tokio::test]
+    async fn test_rename_across_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = LocalStorage::new(tmp.path().to_path_buf());
+        let id = "a1b2c3d4e5f6789012345678abcdef90";
+        storage.init_dir(id).await.unwrap();
+
+        storage
+            .write_file(id, Path::new("src.txt"), b"data")
+            .await
+            .unwrap();
+        // Rename into a new subdirectory (parent auto-created)
+        storage
+            .rename(id, Path::new("src.txt"), Path::new("subdir/dest.txt"))
+            .await
+            .unwrap();
+
+        assert!(storage.read_file(id, Path::new("src.txt")).await.is_err());
+        let data = storage
+            .read_file(id, Path::new("subdir/dest.txt"))
+            .await
+            .unwrap();
+        assert_eq!(data, b"data");
+    }
 }
