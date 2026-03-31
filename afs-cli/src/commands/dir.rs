@@ -73,6 +73,29 @@ pub async fn unmount(fuse_addr: &str, mountpoint: &str) -> Result<()> {
     Ok(())
 }
 
+pub async fn revoke(controller_addr: &str, id: &str, access_key: &str) -> Result<()> {
+    let mut client = connect_controller(controller_addr).await?;
+    let resp = client
+        .revoke_dir(RevokeDirRequest {
+            id: id.to_string(),
+            access_key: access_key.to_string(),
+        })
+        .await?
+        .into_inner();
+
+    println!(
+        "Revoked {} session(s) for directory: {}",
+        resp.sessions_revoked, id
+    );
+    if resp.errors > 0 {
+        println!(
+            "Warning: {} session(s) could not be reached (cleaned up anyway)",
+            resp.errors
+        );
+    }
+    Ok(())
+}
+
 pub async fn list(controller_addr: &str, fs_name: Option<&str>) -> Result<()> {
     let mut client = connect_controller(controller_addr).await?;
     let resp = client

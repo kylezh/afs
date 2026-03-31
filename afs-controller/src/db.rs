@@ -13,6 +13,16 @@ pub struct FsRecord {
     pub created_at: String,
 }
 
+/// Represents an active mount session.
+#[derive(Debug, Clone)]
+pub struct SessionRecord {
+    pub session_id: String,
+    pub dir_id: String,
+    pub stream_id: String,
+    pub mountpoint: String,
+    pub created_at: String,
+}
+
 /// Represents a shared directory.
 #[derive(Debug, Clone)]
 pub struct DirRecord {
@@ -61,6 +71,13 @@ impl Database {
                 fs_name TEXT NOT NULL REFERENCES filesystems(name),
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 status TEXT NOT NULL DEFAULT 'active'
+            );
+            CREATE TABLE IF NOT EXISTS sessions (
+                session_id TEXT PRIMARY KEY,
+                dir_id TEXT NOT NULL REFERENCES dirs(id),
+                stream_id TEXT NOT NULL,
+                mountpoint TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );",
         )
         .context("failed to init schema")?;
@@ -250,6 +267,149 @@ impl Database {
         }
         Ok(result)
     }
+
+    // --- Session operations ---
+
+    pub fn register_session(
+        &self,
+        dir_id: &str,
+        stream_id: &str,
+        mountpoint: &str,
+    ) -> Result<SessionRecord> {
+        let session_id = generate_hex_id();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO sessions (session_id, dir_id, stream_id, mountpoint) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![session_id, dir_id, stream_id, mountpoint],
+        )
+        .context("failed to register session")?;
+
+        let mut stmt = conn.prepare(
+            "SELECT session_id, dir_id, stream_id, mountpoint, created_at FROM sessions WHERE session_id = ?1",
+        )?;
+        let record = stmt.query_row(rusqlite::params![session_id], |row| {
+            Ok(SessionRecord {
+                session_id: row.get(0)?,
+                dir_id: row.get(1)?,
+                stream_id: row.get(2)?,
+                mountpoint: row.get(3)?,
+                created_at: row.get(4)?,
+            })
+        })?;
+        Ok(record)
+    }
+
+    pub fn deregister_session(&self, session_id: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let rows = conn.execute(
+            "DELETE FROM sessions WHERE session_id = ?1",
+            rusqlite::params![session_id],
+        )?;
+        Ok(rows > 0)
+    }
+
+    pub fn get_sessions_for_dir(&self, dir_id: &str) -> Result<Vec<SessionRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT session_id, dir_id, stream_id, mountpoint, created_at FROM sessions WHERE dir_id = ?1",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![dir_id], |row| {
+            Ok(SessionRecord {
+                session_id: row.get(0)?,
+                dir_id: row.get(1)?,
+                stream_id: row.get(2)?,
+                mountpoint: row.get(3)?,
+                created_at: row.get(4)?,
+            })
+        })?;
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row?);
+        }
+        Ok(result)
+    }
+
+    pub fn get_sessions_by_stream(&self, stream_id: &str) -> Result<Vec<SessionRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT session_id, dir_id, stream_id, mountpoint, created_at FROM sessions WHERE stream_id = ?1",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![stream_id], |row| {
+            Ok(SessionRecord {
+                session_id: row.get(0)?,
+                dir_id: row.get(1)?,
+                stream_id: row.get(2)?,
+                mountpoint: row.get(3)?,
+                created_at: row.get(4)?,
+            })
+        })?;
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row?);
+        }
+        Ok(result)
+    }
+
+    pub fn delete_sessions_by_stream(&self, stream_id: &str) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        let rows = conn.execute(
+            "DELETE FROM sessions WHERE stream_id = ?1",
+            rusqlite::params![stream_id],
+        )?;
+        Ok(rows)
+    }
+
+    /// Reconcile session state from a heartbeat: insert missing mounts, remove stale ones.
+    pub fn reconcile_sessions_from_heartbeat(
+        &self,
+        stream_id: &str,
+        mounts: &[(&str, &str)], // (dir_id, mountpoint)
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+
+        // Get current sessions for this stream
+        let mut stmt = conn.prepare(
+            "SELECT session_id, dir_id, mountpoint FROM sessions WHERE stream_id = ?1",
+        )?;
+        let existing: Vec<(String, String, String)> = stmt
+            .query_map(rusqlite::params![stream_id], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })?
+            .collect::<std::result::Result<_, _>>()?;
+
+        // Build set of (dir_id, mountpoint) from heartbeat
+        let heartbeat_set: std::collections::HashSet<(&str, &str)> =
+            mounts.iter().copied().collect();
+
+        // Build set of (dir_id, mountpoint) from DB
+        let db_set: std::collections::HashSet<(String, String)> = existing
+            .iter()
+            .map(|(_, d, m)| (d.clone(), m.clone()))
+            .collect();
+
+        // Insert missing (in heartbeat but not in DB)
+        for (dir_id, mountpoint) in &heartbeat_set {
+            if !db_set.contains(&(dir_id.to_string(), mountpoint.to_string())) {
+                let session_id = generate_hex_id();
+                conn.execute(
+                    "INSERT INTO sessions (session_id, dir_id, stream_id, mountpoint) VALUES (?1, ?2, ?3, ?4)",
+                    rusqlite::params![session_id, dir_id, stream_id, mountpoint],
+                )?;
+            }
+        }
+
+        // Remove stale (in DB but not in heartbeat)
+        for (session_id, dir_id, mountpoint) in &existing {
+            if !heartbeat_set.contains(&(dir_id.as_str(), mountpoint.as_str())) {
+                conn.execute(
+                    "DELETE FROM sessions WHERE session_id = ?1",
+                    rusqlite::params![session_id],
+                )?;
+            }
+        }
+
+        Ok(())
+    }
 }
 
 /// Generate a 32-character random hex string.
@@ -348,5 +508,79 @@ mod tests {
         let db = Database::open(":memory:").unwrap();
         let err = db.create_dir("nonexistent").unwrap_err();
         assert!(err.to_string().contains("not found"));
+    }
+
+    #[test]
+    fn test_session_lifecycle() {
+        let db = Database::open(":memory:").unwrap();
+        db.register_fs("local-dev", "local", r#"{"base_path":"/data"}"#)
+            .unwrap();
+        let dir1 = db.create_dir("local-dev").unwrap();
+        let dir2 = db.create_dir("local-dev").unwrap();
+
+        // Register sessions
+        let s1 = db
+            .register_session(&dir1.id, "stream-a", "/mnt/agent1")
+            .unwrap();
+        assert_eq!(s1.session_id.len(), 32);
+        assert_eq!(s1.dir_id, dir1.id);
+
+        let s2 = db
+            .register_session(&dir1.id, "stream-b", "/mnt/agent2")
+            .unwrap();
+        let _s3 = db
+            .register_session(&dir2.id, "stream-a", "/mnt/agent1-dir2")
+            .unwrap();
+
+        // Query by dir
+        let sessions = db.get_sessions_for_dir(&dir1.id).unwrap();
+        assert_eq!(sessions.len(), 2);
+
+        // Query by stream
+        let sessions = db.get_sessions_by_stream("stream-a").unwrap();
+        assert_eq!(sessions.len(), 2); // s1 and s3
+
+        // Deregister one
+        assert!(db.deregister_session(&s2.session_id).unwrap());
+        assert!(!db.deregister_session("nonexistent").unwrap());
+        let sessions = db.get_sessions_for_dir(&dir1.id).unwrap();
+        assert_eq!(sessions.len(), 1);
+
+        // Delete all sessions for a stream (crash cleanup)
+        let deleted = db.delete_sessions_by_stream("stream-a").unwrap();
+        assert_eq!(deleted, 2); // s1 and s3
+        assert_eq!(db.get_sessions_for_dir(&dir1.id).unwrap().len(), 0);
+        assert_eq!(db.get_sessions_for_dir(&dir2.id).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn test_session_heartbeat_reconciliation() {
+        let db = Database::open(":memory:").unwrap();
+        db.register_fs("local-dev", "local", r#"{"base_path":"/data"}"#)
+            .unwrap();
+        let dir1 = db.create_dir("local-dev").unwrap();
+        let dir2 = db.create_dir("local-dev").unwrap();
+
+        // Register initial session
+        db.register_session(&dir1.id, "stream-a", "/mnt/a")
+            .unwrap();
+
+        // Heartbeat with dir1 still there + new dir2
+        db.reconcile_sessions_from_heartbeat(
+            "stream-a",
+            &[(&dir1.id, "/mnt/a"), (&dir2.id, "/mnt/b")],
+        )
+        .unwrap();
+
+        let sessions = db.get_sessions_by_stream("stream-a").unwrap();
+        assert_eq!(sessions.len(), 2);
+
+        // Heartbeat with only dir2 (dir1 removed)
+        db.reconcile_sessions_from_heartbeat("stream-a", &[(&dir2.id, "/mnt/b")])
+            .unwrap();
+
+        let sessions = db.get_sessions_by_stream("stream-a").unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].dir_id, dir2.id);
     }
 }

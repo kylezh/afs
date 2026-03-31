@@ -14,6 +14,12 @@ service ControllerService {
   rpc DeleteDir(DeleteDirRequest) returns (DeleteDirResponse);
   rpc ValidateToken(ValidateTokenRequest) returns (ValidateTokenResponse);
   rpc ListDirs(ListDirsRequest) returns (ListDirsResponse);
+
+  // Session management
+  rpc RegisterSession(RegisterSessionRequest) returns (RegisterSessionResponse);
+  rpc DeregisterSession(DeregisterSessionRequest) returns (DeregisterSessionResponse);
+  rpc RevokeDir(RevokeDirRequest) returns (RevokeDirResponse);
+  rpc SessionStream(stream Heartbeat) returns (stream SessionCommand);
 }
 
 // --- FUSE Service ---
@@ -139,4 +145,54 @@ message MountInfo {
   string id = 1;
   string mountpoint = 2;
   Permission permission = 3;
+}
+
+// --- Session messages ---
+
+message RegisterSessionRequest {
+  string dir_id = 1;
+  string mountpoint = 2;
+  string stream_id = 3;
+}
+
+message RegisterSessionResponse {
+  string session_id = 1;
+}
+
+message DeregisterSessionRequest {
+  string session_id = 1;
+}
+
+message DeregisterSessionResponse {}
+
+message RevokeDirRequest {
+  string id = 1;
+  string access_key = 2;
+}
+
+message RevokeDirResponse {
+  int32 sessions_revoked = 1;
+  int32 errors = 2;
+}
+
+// --- Session stream messages ---
+
+message Heartbeat {
+  string stream_id = 1;
+  repeated MountStatus mounts = 2;
+}
+
+message MountStatus {
+  string dir_id = 1;
+  string mountpoint = 2;
+}
+
+message SessionCommand {
+  oneof command {
+    ForceUnmount force_unmount = 1;
+  }
+}
+
+message ForceUnmount {
+  string mountpoint = 1;
 }

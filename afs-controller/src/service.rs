@@ -1,19 +1,76 @@
 use std::collections::HashMap;
+use std::pin::Pin;
 use std::sync::Arc;
 
-use tonic::{Request, Response, Status};
+use tokio::sync::{mpsc, Mutex as TokioMutex};
+use tokio_stream::wrappers::ReceiverStream;
+use tonic::{Request, Response, Status, Streaming};
+use tracing::{info, warn};
 
 use crate::db::Database;
 use crate::proto::controller_service_server::ControllerService;
 use crate::proto::*;
 
+type StreamSender = mpsc::Sender<Result<SessionCommand, Status>>;
+
 pub struct ControllerServiceImpl {
     db: Arc<Database>,
+    streams: Arc<TokioMutex<HashMap<String, StreamSender>>>,
 }
 
 impl ControllerServiceImpl {
     pub fn new(db: Arc<Database>) -> Self {
-        Self { db }
+        Self {
+            db,
+            streams: Arc::new(TokioMutex::new(HashMap::new())),
+        }
+    }
+
+    /// Revoke all sessions for a directory. Returns (sessions_revoked, errors).
+    async fn revoke_sessions_for_dir(&self, dir_id: &str) -> (i32, i32) {
+        let sessions = match self.db.get_sessions_for_dir(dir_id) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!("failed to get sessions for dir {}: {}", dir_id, e);
+                return (0, 0);
+            }
+        };
+
+        let mut revoked = 0i32;
+        let mut errors = 0i32;
+
+        let streams = self.streams.lock().await;
+        for session in &sessions {
+            if let Some(tx) = streams.get(&session.stream_id) {
+                let cmd = SessionCommand {
+                    command: Some(session_command::Command::ForceUnmount(ForceUnmount {
+                        mountpoint: session.mountpoint.clone(),
+                    })),
+                };
+                if tx.send(Ok(cmd)).await.is_ok() {
+                    revoked += 1;
+                } else {
+                    warn!(
+                        "stream {} disconnected while revoking session {}",
+                        session.stream_id, session.session_id
+                    );
+                    errors += 1;
+                }
+            } else {
+                warn!(
+                    "stream {} not found for session {}",
+                    session.stream_id, session.session_id
+                );
+                errors += 1;
+            }
+
+            // Delete session record regardless
+            if let Err(e) = self.db.deregister_session(&session.session_id) {
+                warn!("failed to deregister session {}: {}", session.session_id, e);
+            }
+        }
+
+        (revoked, errors)
     }
 }
 
@@ -115,6 +172,15 @@ impl ControllerService for ControllerServiceImpl {
             return Err(Status::invalid_argument("id and access_key are required"));
         }
 
+        // Revoke all sessions first (best-effort)
+        let (revoked, errors) = self.revoke_sessions_for_dir(&req.id).await;
+        if revoked > 0 || errors > 0 {
+            info!(
+                "delete_dir {}: revoked {} session(s), {} error(s)",
+                req.id, revoked, errors
+            );
+        }
+
         match self.db.delete_dir(&req.id, &req.access_key) {
             Ok(true) => Ok(Response::new(DeleteDirResponse {})),
             Ok(false) => Err(Status::not_found("dir not found or invalid access key")),
@@ -180,6 +246,147 @@ impl ControllerService for ControllerServiceImpl {
             .collect();
 
         Ok(Response::new(ListDirsResponse { dirs }))
+    }
+
+    // --- Session management ---
+
+    async fn register_session(
+        &self,
+        request: Request<RegisterSessionRequest>,
+    ) -> Result<Response<RegisterSessionResponse>, Status> {
+        let req = request.into_inner();
+        if req.dir_id.is_empty() || req.mountpoint.is_empty() || req.stream_id.is_empty() {
+            return Err(Status::invalid_argument(
+                "dir_id, mountpoint, and stream_id are required",
+            ));
+        }
+
+        let record = self
+            .db
+            .register_session(&req.dir_id, &req.stream_id, &req.mountpoint)
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        info!(
+            "registered session {} for dir {} on stream {}",
+            record.session_id, req.dir_id, req.stream_id
+        );
+
+        Ok(Response::new(RegisterSessionResponse {
+            session_id: record.session_id,
+        }))
+    }
+
+    async fn deregister_session(
+        &self,
+        request: Request<DeregisterSessionRequest>,
+    ) -> Result<Response<DeregisterSessionResponse>, Status> {
+        let req = request.into_inner();
+        if req.session_id.is_empty() {
+            return Err(Status::invalid_argument("session_id is required"));
+        }
+
+        match self.db.deregister_session(&req.session_id) {
+            Ok(true) => {
+                info!("deregistered session {}", req.session_id);
+                Ok(Response::new(DeregisterSessionResponse {}))
+            }
+            Ok(false) => Err(Status::not_found(format!(
+                "session {} not found",
+                req.session_id
+            ))),
+            Err(e) => Err(Status::internal(e.to_string())),
+        }
+    }
+
+    async fn revoke_dir(
+        &self,
+        request: Request<RevokeDirRequest>,
+    ) -> Result<Response<RevokeDirResponse>, Status> {
+        let req = request.into_inner();
+        if req.id.is_empty() || req.access_key.is_empty() {
+            return Err(Status::invalid_argument("id and access_key are required"));
+        }
+
+        // Validate access key
+        match self.db.validate_token(&req.id, &req.access_key) {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                return Err(Status::permission_denied("invalid id or access key"));
+            }
+            Err(e) => {
+                return Err(Status::internal(e.to_string()));
+            }
+        }
+
+        let (sessions_revoked, errors) = self.revoke_sessions_for_dir(&req.id).await;
+        info!(
+            "revoke_dir {}: {} session(s) revoked, {} error(s)",
+            req.id, sessions_revoked, errors
+        );
+
+        Ok(Response::new(RevokeDirResponse {
+            sessions_revoked,
+            errors,
+        }))
+    }
+
+    type SessionStreamStream =
+        Pin<Box<dyn tokio_stream::Stream<Item = Result<SessionCommand, Status>> + Send>>;
+
+    async fn session_stream(
+        &self,
+        request: Request<Streaming<Heartbeat>>,
+    ) -> Result<Response<Self::SessionStreamStream>, Status> {
+        let mut inbound = request.into_inner();
+        let db = self.db.clone();
+        let streams = self.streams.clone();
+
+        // We'll learn the stream_id from the first heartbeat
+        let (tx, rx) = mpsc::channel(32);
+
+        tokio::spawn(async move {
+            let mut stream_id: Option<String> = None;
+
+            while let Ok(Some(heartbeat)) = inbound.message().await {
+                let sid = heartbeat.stream_id.clone();
+                if sid.is_empty() {
+                    warn!("received heartbeat with empty stream_id, skipping");
+                    continue;
+                }
+
+                // Register stream on first heartbeat
+                if stream_id.is_none() {
+                    stream_id = Some(sid.clone());
+                    streams.lock().await.insert(sid.clone(), tx.clone());
+                    info!("stream {} connected", sid);
+                }
+
+                // Reconcile sessions from heartbeat
+                let mounts: Vec<(&str, &str)> = heartbeat
+                    .mounts
+                    .iter()
+                    .map(|m| (m.dir_id.as_str(), m.mountpoint.as_str()))
+                    .collect();
+
+                if let Err(e) = db.reconcile_sessions_from_heartbeat(&sid, &mounts) {
+                    warn!("failed to reconcile heartbeat for stream {}: {}", sid, e);
+                }
+            }
+
+            // Stream dropped — clean up
+            if let Some(sid) = stream_id {
+                info!("stream {} disconnected, cleaning up sessions", sid);
+                streams.lock().await.remove(&sid);
+                if let Err(e) = db.delete_sessions_by_stream(&sid) {
+                    warn!("failed to clean up sessions for stream {}: {}", sid, e);
+                }
+            }
+        });
+
+        let output_stream = ReceiverStream::new(rx);
+        Ok(Response::new(
+            Box::pin(output_stream) as Self::SessionStreamStream
+        ))
     }
 }
 

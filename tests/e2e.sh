@@ -244,9 +244,111 @@ assert_contains "$list_output" "$DIR1_ID" "dir list shows dir1"
 assert_contains "$list_output" "$DIR2_ID" "dir list shows dir2"
 echo ""
 
-# ── Test 7: Full Cleanup Lifecycle ───────────────────
+# ── Test 7: Revoke with Active Mounts ──────────────
 
-echo "── Test 7: Cleanup lifecycle ──"
+echo "── Test 7: Revoke with active mounts ──"
+
+# Create a new dir specifically for revocation testing
+create_rev_output=$($AFS dir create --fs testfs)
+REV_ID=$(parse_dir_id "$create_rev_output")
+REV_KEY=$(parse_dir_key "$create_rev_output")
+
+MOUNT_REV1="$MOUNT_BASE/rev1"
+MOUNT_REV2="$MOUNT_BASE/rev2"
+mkdir -p "$MOUNT_REV1" "$MOUNT_REV2"
+$AFS dir mount "$REV_ID" --key "$REV_KEY" --mountpoint "$MOUNT_REV1"
+track_mount "$MOUNT_REV1"
+$AFS dir mount "$REV_ID" --key "$REV_KEY" --mountpoint "$MOUNT_REV2"
+track_mount "$MOUNT_REV2"
+sleep 1
+
+echo "revoke data" > "$MOUNT_REV1/test.txt"
+assert_file_content "$MOUNT_REV2/test.txt" "revoke data" "both mounts see data before revoke"
+
+# Revoke — should force unmount both mounts
+revoke_output=$($AFS dir revoke "$REV_ID" --key "$REV_KEY")
+assert_contains "$revoke_output" "Revoked" "revoke command succeeds"
+sleep 1
+
+# After revoke, mounting at the same points should fail (already unmounted by revoke)
+# Verify the revoked dir is still active (revoke ≠ delete)
+list_rev=$($AFS dir list --fs testfs)
+assert_contains "$list_rev" "$REV_ID" "dir still active after revoke"
+
+# Clean up revoke dir
+$AFS dir delete "$REV_ID" --key "$REV_KEY" && pass "delete revoked dir" || fail "delete revoked dir"
+# Remove from tracked mounts since revoke already unmounted
+MOUNTS=("${MOUNTS[@]/$MOUNT_REV1}")
+MOUNTS=("${MOUNTS[@]/$MOUNT_REV2}")
+echo ""
+
+# ── Test 8: Revoke with No Sessions ────────────────
+
+echo "── Test 8: Revoke with no sessions ──"
+
+create_empty_output=$($AFS dir create --fs testfs)
+EMPTY_ID=$(parse_dir_id "$create_empty_output")
+EMPTY_KEY=$(parse_dir_key "$create_empty_output")
+
+# Revoke a dir with zero active mounts — should succeed with 0 sessions
+revoke_empty=$($AFS dir revoke "$EMPTY_ID" --key "$EMPTY_KEY")
+assert_contains "$revoke_empty" "Revoked 0" "revoke with no sessions"
+
+$AFS dir delete "$EMPTY_ID" --key "$EMPTY_KEY" && pass "delete empty dir" || fail "delete empty dir"
+echo ""
+
+# ── Test 9: Revoke with Bad Key ─────────────────────
+
+echo "── Test 9: Revoke with bad key ──"
+
+create_badkey_output=$($AFS dir create --fs testfs)
+BADKEY_ID=$(parse_dir_id "$create_badkey_output")
+BADKEY_KEY=$(parse_dir_key "$create_badkey_output")
+
+if $AFS dir revoke "$BADKEY_ID" --key "0000000000000000000000000000dead" 2>/dev/null; then
+    fail "revoke with bad key rejected (succeeded)"
+else
+    pass "revoke with bad key rejected"
+fi
+
+$AFS dir delete "$BADKEY_ID" --key "$BADKEY_KEY" && pass "cleanup bad key dir" || fail "cleanup bad key dir"
+echo ""
+
+# ── Test 10: Delete Also Revokes ─────────────────────
+
+echo "── Test 10: Delete also revokes ──"
+
+create_del_output=$($AFS dir create --fs testfs)
+DEL_ID=$(parse_dir_id "$create_del_output")
+DEL_KEY=$(parse_dir_key "$create_del_output")
+
+MOUNT_DEL="$MOUNT_BASE/deltest"
+mkdir -p "$MOUNT_DEL"
+$AFS dir mount "$DEL_ID" --key "$DEL_KEY" --mountpoint "$MOUNT_DEL"
+track_mount "$MOUNT_DEL"
+sleep 1
+
+echo "delete test" > "$MOUNT_DEL/data.txt"
+assert_file_content "$MOUNT_DEL/data.txt" "delete test" "mount works before delete"
+
+# Delete should revoke the active mount first, then soft-delete
+$AFS dir delete "$DEL_ID" --key "$DEL_KEY" && pass "delete with active mount" || fail "delete with active mount"
+sleep 1
+
+# Dir should no longer appear in list
+list_del=$($AFS dir list --fs testfs)
+if echo "$list_del" | grep -qF "$DEL_ID"; then
+    fail "deleted dir removed from list"
+else
+    pass "deleted dir removed from list"
+fi
+# Remove from tracked mounts since delete already revoked
+MOUNTS=("${MOUNTS[@]/$MOUNT_DEL}")
+echo ""
+
+# ── Test 11: Full Cleanup Lifecycle ─────────────────
+
+echo "── Test 11: Cleanup lifecycle ──"
 
 $AFS dir unmount "$MOUNT_AGENT1" && pass "unmount agent1" || fail "unmount agent1"
 $AFS dir unmount "$MOUNT_AGENT2" && pass "unmount agent2" || fail "unmount agent2"

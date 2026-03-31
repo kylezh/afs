@@ -79,9 +79,13 @@ Centralized metadata and auth service. Single instance globally.
 | `UnregisterFs` | Unregister an fs (requires no active dirs) |
 | `ListFs` | List all registered filesystems |
 | `CreateDir` | Create a dir on a given fs (metadata only) |
-| `DeleteDir` | Delete a dir (soft delete, requires access key) |
+| `DeleteDir` | Delete a dir (soft delete, requires access key). Also revokes all active sessions first. |
 | `ValidateToken` | Validate a dir's access key, return fs type and config |
 | `ListDirs` | List dirs, supports filtering by fs |
+| `RegisterSession` | Register an active mount session (called by FUSE server after mount) |
+| `DeregisterSession` | Deregister a session (called by FUSE server on unmount) |
+| `RevokeDir` | Force-unmount all active sessions for a dir (requires access key) |
+| `SessionStream` | Bidirectional stream: receives heartbeats from FUSE servers, pushes ForceUnmount commands |
 
 **SQLite Schema:**
 
@@ -100,6 +104,14 @@ CREATE TABLE dirs (
     fs_name TEXT NOT NULL REFERENCES filesystems(name),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     status TEXT NOT NULL DEFAULT 'active'  -- active / deleted
+);
+
+CREATE TABLE sessions (
+    session_id TEXT PRIMARY KEY,   -- 32-char random hex
+    dir_id TEXT NOT NULL REFERENCES dirs(id),
+    stream_id TEXT NOT NULL,       -- identifies the FUSE server's bidi stream
+    mountpoint TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 ```
 
@@ -130,6 +142,51 @@ One per agent host. Mounts shared directories as local FUSE filesystems.
 - Inode mapping: maintains an `InodeTable` mapping between inode numbers and paths (inode 1 = root directory)
 - Sync/async bridge: `fuser::Filesystem` trait is synchronous, `StorageBackend` is async — bridged via `tokio::runtime::Handle::block_on()`
 - Each mounted dir runs as an independent FUSE session
+
+### Sessions & Revocation
+
+The session mechanism provides access control enforcement after initial mount. Without it, a mounted FUSE filesystem continues operating even after the directory's access key is revoked.
+
+**Architecture:**
+
+```
+FUSE Server                                          Controller
+    │                                                     │
+    │──── RegisterSession(dir_id, mountpoint) ───────────>│  (unary RPC)
+    │<─── { session_id } ────────────────────────────────│
+    │                                                     │
+    │════ SessionStream (bidi, persistent) ══════════════│
+    │  upstream:  Heartbeat { mounts: [...] }  (every 10s)│
+    │  downstream: ForceUnmount { mountpoint }            │
+    │                                                     │
+CLI ──── RevokeDir(id, access_key) ──────────────────────>│  (unary RPC)
+```
+
+**Two communication patterns:**
+
+1. **Unary RPCs** for discrete commands: `RegisterSession` (after mount), `DeregisterSession` (on unmount), `RevokeDir` (CLI-initiated)
+2. **Bidirectional stream** for continuous state: heartbeat upstream (every 10s with full mount list) + `ForceUnmount` push downstream
+
+**Session lifecycle:**
+
+1. FUSE server mounts a dir → calls `RegisterSession` with `(dir_id, mountpoint, stream_id)` → gets `session_id`
+2. FUSE server sends periodic heartbeats over the bidi stream with all active mounts
+3. Agent CLI calls `RevokeDir(id, access_key)` → Controller validates key, finds sessions, pushes `ForceUnmount` over streams
+4. FUSE server receives `ForceUnmount` → drops the `BackgroundSession` → FUSE filesystem is torn down immediately
+5. On normal unmount → FUSE server calls `DeregisterSession`
+
+**Self-healing via heartbeat reconciliation:**
+
+- Mount in heartbeat but not in DB → auto-register (self-healing if a `RegisterSession` was lost)
+- Mount in DB but not in heartbeat → auto-clean (stale session removal)
+- Stream drops → Controller deletes all sessions for that `stream_id` (crash detection)
+
+**Error handling:**
+
+- If `RegisterSession` fails after mount, the mount still works — heartbeat will reconcile
+- If `DeregisterSession` fails on unmount, the unmount still succeeds — heartbeat will reconcile
+- On revoke, unreachable FUSE servers have their sessions cleaned up (best-effort)
+- `DeleteDir` revokes all sessions before soft-deleting (best-effort)
 
 ### Storage (`afs-storage`)
 
@@ -176,6 +233,7 @@ afs dir create --fs <fs-name>
 afs dir delete <id> --key <access_key>
 afs dir mount <id> --key <key> --mountpoint <path> [--readonly]
 afs dir unmount <mountpoint>
+afs dir revoke <id> --key <access_key>
 afs dir list [--fs <fs-name>]
 
 # Global options

@@ -2,7 +2,9 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+use rand::Rng;
 use tonic::{Request, Response, Status};
+use tracing::warn;
 
 use afs_storage::local::LocalStorage;
 use afs_storage::nfs::NfsStorage;
@@ -17,19 +19,95 @@ struct ActiveMount {
     id: String,
     mountpoint: String,
     permission: MountPermission,
+    session_id: String,
     _session: fuser::BackgroundSession,
 }
 
 pub struct FuseServiceImpl {
     controller_addr: String,
-    mounts: Mutex<HashMap<String, ActiveMount>>,
+    stream_id: String,
+    mounts: Arc<Mutex<HashMap<String, ActiveMount>>>,
 }
 
 impl FuseServiceImpl {
     pub fn new(controller_addr: String) -> Self {
+        let stream_id = generate_stream_id();
         Self {
             controller_addr,
-            mounts: Mutex::new(HashMap::new()),
+            stream_id,
+            mounts: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    pub fn stream_id(&self) -> &str {
+        &self.stream_id
+    }
+
+    /// Get snapshot of current mounts as (dir_id, mountpoint) pairs for heartbeat.
+    pub fn mount_statuses(&self) -> Vec<(String, String)> {
+        let mounts = self.mounts.lock().unwrap();
+        mounts
+            .values()
+            .map(|m| (m.id.clone(), m.mountpoint.clone()))
+            .collect()
+    }
+
+    /// Force unmount a mountpoint (called by session stream command reader).
+    pub fn force_unmount(&self, mountpoint: &str) -> bool {
+        let mut mounts = self.mounts.lock().unwrap();
+        mounts.remove(mountpoint).is_some()
+        // BackgroundSession dropped → FUSE unmounted
+    }
+
+    async fn register_session_with_controller(
+        &self,
+        dir_id: &str,
+        mountpoint: &str,
+    ) -> Option<String> {
+        let endpoint = format!("http://{}", &self.controller_addr);
+        match ControllerServiceClient::connect(endpoint).await {
+            Ok(mut client) => {
+                match client
+                    .register_session(RegisterSessionRequest {
+                        dir_id: dir_id.to_string(),
+                        mountpoint: mountpoint.to_string(),
+                        stream_id: self.stream_id.clone(),
+                    })
+                    .await
+                {
+                    Ok(resp) => Some(resp.into_inner().session_id),
+                    Err(e) => {
+                        warn!("failed to register session: {}", e);
+                        None
+                    }
+                }
+            }
+            Err(e) => {
+                warn!("failed to connect to controller for session registration: {}", e);
+                None
+            }
+        }
+    }
+
+    async fn deregister_session_with_controller(&self, session_id: &str) {
+        if session_id.is_empty() {
+            return;
+        }
+        let endpoint = format!("http://{}", &self.controller_addr);
+        match ControllerServiceClient::connect(endpoint).await {
+            Ok(mut client) => {
+                if let Err(e) = client
+                    .deregister_session(DeregisterSessionRequest {
+                        session_id: session_id.to_string(),
+                    })
+                    .await
+                {
+                    warn!("failed to deregister session {}: {}", session_id, e);
+                }
+            }
+            Err(e) => {
+                warn!("failed to connect to controller for session deregistration: {}", e);
+            }
         }
     }
 
@@ -151,10 +229,17 @@ impl FuseService for FuseServiceImpl {
         let session = fuser::spawn_mount2(fs, &req.mountpoint, &config)
             .map_err(|e| Status::internal(format!("failed to mount FUSE: {}", e)))?;
 
+        // Register session with controller (best-effort)
+        let session_id = self
+            .register_session_with_controller(&req.id, &req.mountpoint)
+            .await
+            .unwrap_or_default();
+
         let mount = ActiveMount {
             id: req.id,
             mountpoint: req.mountpoint.clone(),
             permission,
+            session_id,
             _session: session,
         };
 
@@ -177,16 +262,24 @@ impl FuseService for FuseServiceImpl {
             return Err(Status::invalid_argument("mountpoint is required"));
         }
 
-        let mut mounts = self.mounts.lock().unwrap();
-        if mounts.remove(&req.mountpoint).is_none() {
-            return Err(Status::not_found(format!(
+        let removed = {
+            let mut mounts = self.mounts.lock().unwrap();
+            mounts.remove(&req.mountpoint)
+        };
+
+        match removed {
+            Some(mount) => {
+                // Deregister session with controller (best-effort)
+                self.deregister_session_with_controller(&mount.session_id)
+                    .await;
+                // BackgroundSession is dropped, which unmounts the filesystem
+                Ok(Response::new(UnmountResponse {}))
+            }
+            None => Err(Status::not_found(format!(
                 "no mount at {}",
                 req.mountpoint
-            )));
+            ))),
         }
-        // BackgroundSession is dropped, which unmounts the filesystem
-
-        Ok(Response::new(UnmountResponse {}))
     }
 
     async fn list_mounts(
@@ -210,4 +303,11 @@ impl FuseService for FuseServiceImpl {
             mounts: mount_infos,
         }))
     }
+}
+
+/// Generate a 32-character random hex string for stream identification.
+fn generate_stream_id() -> String {
+    let mut rng = rand::thread_rng();
+    let bytes: [u8; 16] = rng.gen();
+    hex::encode(bytes)
 }

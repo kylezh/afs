@@ -98,6 +98,14 @@ pub enum DirCommands {
         /// Mount point to unmount
         mountpoint: String,
     },
+    /// Revoke all active mounts for a directory
+    Revoke {
+        /// Directory ID
+        id: String,
+        /// Access key
+        #[arg(long)]
+        key: String,
+    },
     /// List shared directories
     List {
         /// Filter by filesystem name

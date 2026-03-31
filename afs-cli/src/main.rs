@@ -62,6 +62,9 @@ async fn main() -> Result<()> {
             DirCommands::Unmount { mountpoint } => {
                 commands::dir::unmount(&cli.fuse_server, &mountpoint).await?;
             }
+            DirCommands::Revoke { id, key } => {
+                commands::dir::revoke(&cli.controller, &id, &key).await?;
+            }
             DirCommands::List { fs } => {
                 commands::dir::list(&cli.controller, fs.as_deref()).await?;
             }
