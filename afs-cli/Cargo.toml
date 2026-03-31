@@ -1,0 +1,21 @@
+[package]
+name = "afs-cli"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "afs"
+path = "src/main.rs"
+
+[dependencies]
+afs-common = { path = "../afs-common" }
+anyhow = { workspace = true }
+clap = { workspace = true }
+prost = { workspace = true }
+tokio = { workspace = true }
+tonic = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[build-dependencies]
+tonic-build = { workspace = true }

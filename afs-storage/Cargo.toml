@@ -1,0 +1,15 @@
+[package]
+name = "afs-storage"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+afs-common = { path = "../afs-common" }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true }

@@ -1,0 +1,36 @@
+[workspace]
+resolver = "2"
+members = [
+    "afs-common",
+    "afs-storage",
+    "afs-controller",
+    "afs-fuse",
+    "afs-cli",
+]
+default-members = [
+    "afs-common",
+    "afs-storage",
+    "afs-controller",
+    "afs-cli",
+]
+
+[workspace.dependencies]
+anyhow = "1"
+async-trait = "0.1"
+clap = { version = "4", features = ["derive"] }
+fuser = "0.17"
+hex = "0.4"
+libc = "0.2"
+prost = "0.13"
+rand = "0.8"
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+toml = "0.8"
+tonic = "0.12"
+tonic-build = "0.12"
+tracing = "0.1"
+tempfile = "3"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
