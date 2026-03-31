@@ -43,7 +43,7 @@ pub async fn mount(
     id: &str,
     access_key: &str,
     mountpoint: &str,
-    _readonly: bool,
+    readonly: bool,
 ) -> Result<()> {
     let mut client = connect_fuse(fuse_addr).await?;
     let resp = client
@@ -52,6 +52,7 @@ pub async fn mount(
             access_key: access_key.to_string(),
             mountpoint: mountpoint.to_string(),
             controller_addr: controller_addr.to_string(),
+            readonly,
         })
         .await?
         .into_inner();

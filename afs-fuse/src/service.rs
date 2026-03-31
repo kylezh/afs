@@ -116,7 +116,7 @@ impl FuseService for FuseServiceImpl {
             .validate_with_controller(&req.id, &req.access_key, &req.controller_addr)
             .await?;
 
-        let permission = if validation.permission == Permission::ReadOnly as i32 {
+        let permission = if req.readonly || validation.permission == Permission::ReadOnly as i32 {
             MountPermission::ReadOnly
         } else {
             MountPermission::ReadWrite

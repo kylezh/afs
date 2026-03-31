@@ -10,5 +10,8 @@ COPY . .
 # Build the full workspace
 RUN cargo build --workspace
 
-# Run all tests
-CMD ["cargo", "test", "--workspace"]
+# Make E2E test script executable
+RUN chmod +x tests/e2e.sh
+
+# Run unit tests then E2E tests
+CMD cargo test --workspace && ./tests/e2e.sh

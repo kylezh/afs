@@ -116,6 +116,7 @@ message MountRequest {
   string access_key = 2;
   string mountpoint = 3;
   string controller_addr = 4;
+  bool readonly = 5;
 }
 
 message MountResponse {
