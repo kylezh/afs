@@ -36,12 +36,20 @@ impl ControllerServiceImpl {
             }
         };
 
+        // Collect senders while holding the lock briefly, then release
+        let to_revoke: Vec<_> = {
+            let streams = self.streams.lock().await;
+            sessions
+                .iter()
+                .map(|s| (s.clone(), streams.get(&s.stream_id).cloned()))
+                .collect()
+        };
+
         let mut revoked = 0i32;
         let mut errors = 0i32;
 
-        let streams = self.streams.lock().await;
-        for session in &sessions {
-            if let Some(tx) = streams.get(&session.stream_id) {
+        for (session, tx) in &to_revoke {
+            if let Some(tx) = tx {
                 let cmd = SessionCommand {
                     command: Some(session_command::Command::ForceUnmount(ForceUnmount {
                         mountpoint: session.mountpoint.clone(),

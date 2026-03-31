@@ -618,3 +618,215 @@ async fn test_session_stream_heartbeat_and_force_unmount() {
         _ => panic!("expected ForceUnmount command"),
     }
 }
+
+#[tokio::test]
+async fn test_register_session_empty_fields() {
+    let (addr, _handle) = start_controller().await;
+    let mut client = connect(&addr).await;
+
+    // Empty dir_id
+    let err = client
+        .register_session(RegisterSessionRequest {
+            dir_id: String::new(),
+            mountpoint: "/mnt/test".to_string(),
+            stream_id: "stream-1".to_string(),
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+
+    // Empty mountpoint
+    let err = client
+        .register_session(RegisterSessionRequest {
+            dir_id: "some-dir".to_string(),
+            mountpoint: String::new(),
+            stream_id: "stream-1".to_string(),
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+
+    // Empty stream_id
+    let err = client
+        .register_session(RegisterSessionRequest {
+            dir_id: "some-dir".to_string(),
+            mountpoint: "/mnt/test".to_string(),
+            stream_id: String::new(),
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+}
+
+#[tokio::test]
+async fn test_deregister_session_empty_id() {
+    let (addr, _handle) = start_controller().await;
+    let mut client = connect(&addr).await;
+
+    let err = client
+        .deregister_session(DeregisterSessionRequest {
+            session_id: String::new(),
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+}
+
+#[tokio::test]
+async fn test_revoke_dir_empty_fields() {
+    let (addr, _handle) = start_controller().await;
+    let mut client = connect(&addr).await;
+
+    // Empty id
+    let err = client
+        .revoke_dir(RevokeDirRequest {
+            id: String::new(),
+            access_key: "some-key".to_string(),
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+
+    // Empty access_key
+    let err = client
+        .revoke_dir(RevokeDirRequest {
+            id: "some-id".to_string(),
+            access_key: String::new(),
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+}
+
+#[tokio::test]
+async fn test_delete_dir_cleans_up_sessions() {
+    let (addr, _handle) = start_controller().await;
+    let mut client = connect(&addr).await;
+
+    // Setup
+    client
+        .register_fs(RegisterFsRequest {
+            name: "local-test".to_string(),
+            fs_type: "local".to_string(),
+            config: [("base_path".to_string(), "/tmp/test".to_string())]
+                .into_iter()
+                .collect(),
+        })
+        .await
+        .unwrap();
+
+    let dir = client
+        .create_dir(CreateDirRequest {
+            fs_name: "local-test".to_string(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+
+    // Register sessions (with fake streams — they'll count as errors during revoke)
+    client
+        .register_session(RegisterSessionRequest {
+            dir_id: dir.id.clone(),
+            mountpoint: "/mnt/agent1".to_string(),
+            stream_id: "fake-stream".to_string(),
+        })
+        .await
+        .unwrap();
+
+    client
+        .register_session(RegisterSessionRequest {
+            dir_id: dir.id.clone(),
+            mountpoint: "/mnt/agent2".to_string(),
+            stream_id: "fake-stream".to_string(),
+        })
+        .await
+        .unwrap();
+
+    // Delete dir — should revoke sessions first (best-effort), then delete
+    client
+        .delete_dir(DeleteDirRequest {
+            id: dir.id.clone(),
+            access_key: dir.access_key.clone(),
+        })
+        .await
+        .unwrap();
+
+    // Dir should be gone
+    let list = client
+        .list_dirs(ListDirsRequest {
+            fs_name: "local-test".to_string(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(list.dirs.is_empty());
+}
+
+#[tokio::test]
+async fn test_revoke_idempotent() {
+    let (addr, _handle) = start_controller().await;
+    let mut client = connect(&addr).await;
+
+    client
+        .register_fs(RegisterFsRequest {
+            name: "local-test".to_string(),
+            fs_type: "local".to_string(),
+            config: [("base_path".to_string(), "/tmp/test".to_string())]
+                .into_iter()
+                .collect(),
+        })
+        .await
+        .unwrap();
+
+    let dir = client
+        .create_dir(CreateDirRequest {
+            fs_name: "local-test".to_string(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+
+    // Register a session with a fake stream
+    client
+        .register_session(RegisterSessionRequest {
+            dir_id: dir.id.clone(),
+            mountpoint: "/mnt/test".to_string(),
+            stream_id: "fake-stream".to_string(),
+        })
+        .await
+        .unwrap();
+
+    // First revoke cleans up the session
+    let resp = client
+        .revoke_dir(RevokeDirRequest {
+            id: dir.id.clone(),
+            access_key: dir.access_key.clone(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(resp.errors, 1); // fake stream = error
+    assert_eq!(resp.sessions_revoked, 0);
+
+    // Second revoke — sessions already cleaned up, should return 0/0
+    let resp = client
+        .revoke_dir(RevokeDirRequest {
+            id: dir.id.clone(),
+            access_key: dir.access_key.clone(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(resp.sessions_revoked, 0);
+    assert_eq!(resp.errors, 0);
+
+    // Dir still active
+    let list = client
+        .list_dirs(ListDirsRequest {
+            fs_name: "local-test".to_string(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(list.dirs.len(), 1);
+}

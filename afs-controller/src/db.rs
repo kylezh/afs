@@ -58,7 +58,8 @@ impl Database {
     fn init_schema(&self) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS filesystems (
+            "PRAGMA foreign_keys = ON;
+            CREATE TABLE IF NOT EXISTS filesystems (
                 name TEXT PRIMARY KEY,
                 fs_type TEXT NOT NULL,
                 config TEXT NOT NULL,
@@ -582,5 +583,82 @@ mod tests {
         let sessions = db.get_sessions_by_stream("stream-a").unwrap();
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].dir_id, dir2.id);
+    }
+
+    #[test]
+    fn test_reconcile_empty_heartbeat_clears_sessions() {
+        let db = Database::open(":memory:").unwrap();
+        db.register_fs("local-dev", "local", r#"{"base_path":"/data"}"#)
+            .unwrap();
+        let dir1 = db.create_dir("local-dev").unwrap();
+        let dir2 = db.create_dir("local-dev").unwrap();
+
+        db.register_session(&dir1.id, "stream-a", "/mnt/a").unwrap();
+        db.register_session(&dir2.id, "stream-a", "/mnt/b").unwrap();
+        assert_eq!(db.get_sessions_by_stream("stream-a").unwrap().len(), 2);
+
+        // Empty heartbeat → all sessions for this stream should be removed
+        db.reconcile_sessions_from_heartbeat("stream-a", &[]).unwrap();
+        assert_eq!(db.get_sessions_by_stream("stream-a").unwrap().len(), 0);
+    }
+
+    #[test]
+    fn test_delete_sessions_by_nonexistent_stream() {
+        let db = Database::open(":memory:").unwrap();
+        let deleted = db.delete_sessions_by_stream("nonexistent").unwrap();
+        assert_eq!(deleted, 0);
+    }
+
+    #[test]
+    fn test_get_sessions_for_nonexistent_dir() {
+        let db = Database::open(":memory:").unwrap();
+        let sessions = db.get_sessions_for_dir("nonexistent").unwrap();
+        assert!(sessions.is_empty());
+    }
+
+    #[test]
+    fn test_multiple_sessions_same_dir_different_streams() {
+        let db = Database::open(":memory:").unwrap();
+        db.register_fs("local-dev", "local", r#"{"base_path":"/data"}"#)
+            .unwrap();
+        let dir = db.create_dir("local-dev").unwrap();
+
+        let s1 = db.register_session(&dir.id, "stream-a", "/mnt/a").unwrap();
+        let s2 = db.register_session(&dir.id, "stream-b", "/mnt/b").unwrap();
+
+        // Both sessions exist for the same dir
+        let sessions = db.get_sessions_for_dir(&dir.id).unwrap();
+        assert_eq!(sessions.len(), 2);
+
+        // Each stream sees only its own session
+        assert_eq!(db.get_sessions_by_stream("stream-a").unwrap().len(), 1);
+        assert_eq!(db.get_sessions_by_stream("stream-b").unwrap().len(), 1);
+
+        // Deregister one doesn't affect the other
+        db.deregister_session(&s1.session_id).unwrap();
+        assert_eq!(db.get_sessions_for_dir(&dir.id).unwrap().len(), 1);
+        assert_eq!(db.get_sessions_for_dir(&dir.id).unwrap()[0].session_id, s2.session_id);
+    }
+
+    #[test]
+    fn test_reconcile_idempotent() {
+        let db = Database::open(":memory:").unwrap();
+        db.register_fs("local-dev", "local", r#"{"base_path":"/data"}"#)
+            .unwrap();
+        let dir = db.create_dir("local-dev").unwrap();
+
+        let mounts = [(&*dir.id, "/mnt/a")];
+
+        // First reconcile creates the session
+        db.reconcile_sessions_from_heartbeat("stream-a", &mounts).unwrap();
+        assert_eq!(db.get_sessions_by_stream("stream-a").unwrap().len(), 1);
+
+        // Second identical reconcile doesn't duplicate
+        db.reconcile_sessions_from_heartbeat("stream-a", &mounts).unwrap();
+        assert_eq!(db.get_sessions_by_stream("stream-a").unwrap().len(), 1);
+
+        // Third identical reconcile still idempotent
+        db.reconcile_sessions_from_heartbeat("stream-a", &mounts).unwrap();
+        assert_eq!(db.get_sessions_by_stream("stream-a").unwrap().len(), 1);
     }
 }
