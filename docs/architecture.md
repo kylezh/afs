@@ -152,7 +152,7 @@ The session mechanism provides access control enforcement after initial mount. W
 ```
 FUSE Server                                          Controller
     │                                                     │
-    │──── RegisterSession(dir_id, mountpoint) ───────────>│  (unary RPC)
+    │──── RegisterSession(dir_id, mountpoint, stream_id) ─>│  (unary RPC)
     │<─── { session_id } ────────────────────────────────│
     │                                                     │
     │════ SessionStream (bidi, persistent) ══════════════│
@@ -294,6 +294,8 @@ Agent 1                CLI              Controller          FUSE Server 1       
   |                     |                    |   fs config        |-- init_dir() --→|
   |                     |                    |                    |  (first mount)  |
   |                     |                    |                    |-- FUSE mount ---→|
+  |                     |                    |←- RegisterSession -|                 |
+  |                     |                    |-- session_id -----→|                 |
   |←-- mounted ---------|←-- ok -------------------------------------|                 |
   |                     |                    |                    |                 |
   |  4. Read/write      |                    |                    |                 |
@@ -312,11 +314,26 @@ Agent 2               CLI              Controller         FUSE Server 2        S
   |--------------------→|------ Mount ------------------------- →|                 |
   |                     |                    |←-- ValidateToken --|                 |
   |                     |                    |-- ok ------------→|-- FUSE mount --→|
-  |←-- mounted ---------|←-- ok -------------------------------------|  (dir exists)   |
+  |                     |                    |←- RegisterSession -|  (dir exists)   |
+  |                     |                    |-- session_id -----→|                 |
+  |←-- mounted ---------|←-- ok -------------------------------------|                 |
   |                     |                    |                    |                 |
   |  7. Read shared     |                    |                    |                 |
   |     files           |                    |                    |                 |
   |←-- read from /mnt/afs/<id>/file.txt ------------------------------------------ |
+
+Agent 1               CLI              Controller         FUSE Server 1/2      Storage
+  |                     |                    |                    |                 |
+  |  8. Revoke access   |                    |                    |                 |
+  |--------------------→|-- RevokeDir ------→|                    |                 |
+  |                     |   (validates key)  |-- ForceUnmount ---→|                 |
+  |                     |                    |  (via bidi stream) |-- drop FUSE ---|
+  |←-- revoked N -------|←-- sessions_revoked|                    |                 |
+  |                     |                    |                    |                 |
+  |  9. Unmount         |                    |                    |                 |
+  |--------------------→|------ Unmount ----------------------------→|                 |
+  |                     |                    |←- DeregisterSession|                 |
+  |←-- unmounted -------|←-- ok -------------------------------------|                 |
 ```
 
 ### Key Design Decisions
@@ -390,7 +407,9 @@ afs/
 │       └── commands/
 │           ├── mod.rs          # CLI struct definitions (Cli, Commands, FsCommands, DirCommands)
 │           ├── fs.rs           # afs fs add/remove/list
-│           └── dir.rs          # afs dir create/delete/mount/unmount/list
+│           └── dir.rs          # afs dir create/delete/mount/unmount/revoke/list
+├── tests/
+│   └── e2e.sh                  # shell-based E2E tests (run in Docker with FUSE)
 ├── docs/
 │   ├── architecture.md         # this file
 │   └── plans/                  # design documents
