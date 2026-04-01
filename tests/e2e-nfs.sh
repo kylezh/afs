@@ -11,11 +11,11 @@ STORAGE_BASE="/mnt/nfs-test"
 source "$SCRIPT_DIR/e2e-lib.sh"
 
 nfs_cleanup() {
-    cleanup
-    # Kill NFS daemons started by setup-nfs.sh
+    # Kill NFS daemons BEFORE cleanup (cleanup calls exit)
     umount /mnt/nfs-test 2>/dev/null || true
     killall ganesha.nfsd 2>/dev/null || true
     killall rpcbind 2>/dev/null || true
+    cleanup
 }
 trap 'nfs_cleanup' EXIT
 
