@@ -12,7 +12,7 @@ Rust workspace with 5 crates:
 - `afs-common` — shared error types
 - `afs-cli` — CLI binary (`afs`)
 
-Protobuf definitions are in `proto/afs.proto`.
+Protobuf definitions are in `proto/afs.proto`. See [docs/cli.md](docs/cli.md) for full CLI reference.
 
 ## Build & Test
 

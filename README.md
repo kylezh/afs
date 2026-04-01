@@ -180,6 +180,8 @@ Global options:
   --fuse-server <addr>    FUSE server address (default: 127.0.0.1:9101)
 ```
 
+See [docs/cli.md](docs/cli.md) for the full CLI documentation including daemon configuration.
+
 ## Testing
 
 ```sh
