@@ -345,6 +345,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_write_file_failure() {
+        // Root bypasses filesystem permissions, so this test is meaningless as root
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+
         let tmp = tempfile::tempdir().unwrap();
         let storage = LocalStorage::new(tmp.path().to_path_buf());
         let id = "a1b2c3d4e5f6789012345678abcdef90";
@@ -387,6 +392,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_remove_dir_failure() {
+        // Root bypasses filesystem permissions, so this test is meaningless as root
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+
         // Use a base path under a file so the dir_root resolves to something unmovable
         let tmp = tempfile::tempdir().unwrap();
         let storage = LocalStorage::new(tmp.path().to_path_buf());
