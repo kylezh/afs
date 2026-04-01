@@ -2,7 +2,11 @@ FROM rust:1.86-bookworm
 
 RUN apt-get update && apt-get install -y \
     fuse3 libfuse3-dev pkg-config protobuf-compiler \
+    nfs-ganesha nfs-ganesha-vfs nfs-common rpcbind dbus \
     && rm -rf /var/lib/apt/lists/*
+
+# Create ganesha log directory
+RUN mkdir -p /var/log/ganesha
 
 WORKDIR /app
 COPY . .
@@ -10,8 +14,11 @@ COPY . .
 # Build the full workspace
 RUN cargo build --workspace
 
-# Make E2E test script executable
-RUN chmod +x tests/e2e.sh
+# Make test scripts executable
+RUN chmod +x tests/e2e.sh tests/e2e-lib.sh tests/e2e-nfs.sh tests/setup-nfs.sh
 
-# Run unit tests then E2E tests
-CMD cargo test --workspace && ./tests/e2e.sh
+# Run unit tests, local E2E, then NFS E2E
+CMD cargo test --workspace \
+    && ./tests/e2e.sh \
+    && ./tests/setup-nfs.sh \
+    && ./tests/e2e-nfs.sh
