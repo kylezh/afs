@@ -25,7 +25,7 @@ start_services
 
 echo "── Test 1: NFS filesystem registration ──"
 
-$AFS fs add testfs --type nfs --mount-path "$STORAGE_BASE"
+$AFS fs add testfs --type nfs --nfs-server 127.0.0.1 --nfs-path /export --mount-path "$STORAGE_BASE"
 output=$($AFS fs list)
 assert_contains "$output" "testfs" "fs appears in list"
 assert_contains "$output" "nfs" "fs type is nfs"
