@@ -16,12 +16,12 @@ afs is a system for sharing file context between AI agents. It mounts shared sto
 ## System Architecture
 
 ```
-                         ┌──────────────────────────────────┐
-                         │         Controller Host           │
+                         ┌────────────────────────────────────┐
+                         │          Controller Host           │
                          │                                    │
-                         │   ┌────────────────────────────┐  │
+                         │   ┌─────────────────────────────┐  │
                          │   │      afs-controller         │  │
-                         │   │                              │  │
+                         │   │                             │  │
                          │   │  ┌──────────┐  ┌──────────┐ │  │
                          │   │  │ gRPC API │  │  SQLite  │ │  │
                          │   │  │ :9100    │  │(metadata)│ │  │
@@ -33,19 +33,19 @@ afs is a system for sharing file context between AI agents. It mounts shared sto
                                      │
               ┌──────────────────────┼──────────────────────┐
               │                      │                      │
-┌─────────────┼──────────┐ ┌────────┼─────────┐  ┌─────────┼────────┐
+┌─────────────┼──────────┐ ┌─────────┼─────────┐  ┌─────────┼────────┐
 │  Agent Host 1          │ │  Agent Host 2     │  │  Agent Host N    │
 │                        │ │                   │  │                  │
-│  ┌──────────────────┐  │ │  ┌─────────────┐  │  │  ┌────────────┐ │
-│  │   afs-fuse       │  │ │  │  afs-fuse   │  │  │  │  afs-fuse  │ │
-│  │   gRPC :9101     │  │ │  │  gRPC :9101 │  │  │  │  gRPC :9101│ │
-│  └────────┬─────────┘  │ │  └──────┬──────┘  │  │  └─────┬──────┘ │
-│           │ FUSE mount  │ │        │          │  │        │        │
-│    /mnt/afs/<id>        │ │  /mnt/afs/<id>    │  │  /mnt/afs/<id>  │
-│           │             │ │        │          │  │        │        │
-│    StorageBackend       │ │  StorageBackend   │  │  StorageBackend │
-│    (local / NFS)        │ │  (local / NFS)    │  │  (local / NFS)  │
-└─────────────────────────┘ └───────────────────┘  └─────────────────┘
+│  ┌──────────────────┐  │ │  ┌─────────────┐  │  │  ┌────────────┐  │
+│  │   afs-fuse       │  │ │  │  afs-fuse   │  │  │  │  afs-fuse  │  │
+│  │   gRPC :9101     │  │ │  │  gRPC :9101 │  │  │  │  gRPC :9101│  │
+│  └────────┬─────────┘  │ │  └──────┬──────┘  │  │  └─────┬──────┘  │
+│           │ FUSE mount │ │         │         │  │        │         │
+│    /mnt/afs/<id>       │ │  /mnt/afs/<id>    │  │  /mnt/afs/<id>   │
+│           │            │ │         │         │  │        │         │
+│    StorageBackend      │ │  StorageBackend   │  │  StorageBackend  │
+│    (local / NFS)       │ │  (local / NFS)    │  │  (local / NFS)   │
+└────────────────────────┘ └───────────────────┘  └──────────────────┘
               │                      │                      │
               └──────────────────────┼──────────────────────┘
                                      │
@@ -152,10 +152,10 @@ The session mechanism provides access control enforcement after initial mount. W
 ```
 FUSE Server                                          Controller
     │                                                     │
-    │──── RegisterSession(dir_id, mountpoint, stream_id) ─>│  (unary RPC)
-    │<─── { session_id } ────────────────────────────────│
+    │─── RegisterSession(dir_id, mountpoint, stream_id) ─>│  (unary RPC)
+    │<─── { session_id } ─────────────────────────────────│
     │                                                     │
-    │════ SessionStream (bidi, persistent) ══════════════│
+    │════ SessionStream (bidi, persistent) ═══════════════│
     │  upstream:  Heartbeat { mounts: [...] }  (every 10s)│
     │  downstream: ForceUnmount { mountpoint }            │
     │                                                     │
@@ -288,52 +288,52 @@ Agent 1                CLI              Controller          FUSE Server 1       
   |←-- id + access_key -|←-- id + key -------|                    |                 |
   |                     |                    |                    |                 |
   |  3. Mount           |                    |                    |                 |
-  |--------------------→|------ Mount --------------────────────→|                 |
+  |--------------------→|------ Mount ---------------------------→|                 |
   |                     |                    |←-- ValidateToken --|                 |
   |                     |                    |-- permission + ---→|                 |
   |                     |                    |   fs config        |-- init_dir() --→|
   |                     |                    |                    |  (first mount)  |
-  |                     |                    |                    |-- FUSE mount ---→|
+  |                     |                    |                    |-- FUSE mount --→|
   |                     |                    |←- RegisterSession -|                 |
   |                     |                    |-- session_id -----→|                 |
-  |←-- mounted ---------|←-- ok -------------------------------------|                 |
+  |←-- mounted ---------|←-- ok ----------------------------------|                 |
   |                     |                    |                    |                 |
   |  4. Read/write      |                    |                    |                 |
-  |-- write to /mnt/afs/<id>/file.txt ------------------------------------------- →|
-  |←-- read from /mnt/afs/<id>/file.txt ------------------------------------------ |
+  |-- write to /mnt/afs/<id>/file.txt -------------------------------------------- →|
+  |←-- read from /mnt/afs/<id>/file.txt ------------------------------------------- |
   |                     |                    |                    |                 |
   |  5. Share with      |                    |                    |                 |
   |     Agent 2         |                    |                    |                 |
-  |-- send id + key --→ Agent 2             |                    |                 |
+  |-- send id + key --→ Agent 2              |                    |                 |
   |                     |                    |                    |                 |
 
-Agent 2               CLI              Controller         FUSE Server 2        Storage
+Agent 2                CLI              Controller          FUSE Server 2       Storage
   |                     |                    |                    |                 |
   |  6. Mount           |                    |                    |                 |
   |  (different host)   |                    |                    |                 |
-  |--------------------→|------ Mount ------------------------- →|                 |
+  |--------------------→|------ Mount ---------------------------→|                 |
   |                     |                    |←-- ValidateToken --|                 |
-  |                     |                    |-- ok ------------→|-- FUSE mount --→|
+  |                     |                    |-- ok -------------→|-- FUSE mount --→|
   |                     |                    |←- RegisterSession -|  (dir exists)   |
   |                     |                    |-- session_id -----→|                 |
-  |←-- mounted ---------|←-- ok -------------------------------------|                 |
+  |←-- mounted ---------|←-- ok ----------------------------------|                 |
   |                     |                    |                    |                 |
   |  7. Read shared     |                    |                    |                 |
   |     files           |                    |                    |                 |
-  |←-- read from /mnt/afs/<id>/file.txt ------------------------------------------ |
+  |←-- read from /mnt/afs/<id>/file.txt ------------------------------------------- |
 
-Agent 1               CLI              Controller         FUSE Server 1/2      Storage
+Agent 1                CLI              Controller          FUSE Server 1/2     Storage
   |                     |                    |                    |                 |
   |  8. Revoke access   |                    |                    |                 |
   |--------------------→|-- RevokeDir ------→|                    |                 |
   |                     |   (validates key)  |-- ForceUnmount ---→|                 |
-  |                     |                    |  (via bidi stream) |-- drop FUSE ---|
+  |                     |                    |  (via bidi stream) |-- drop FUSE ----|
   |←-- revoked N -------|←-- sessions_revoked|                    |                 |
   |                     |                    |                    |                 |
   |  9. Unmount         |                    |                    |                 |
-  |--------------------→|------ Unmount ----------------------------→|                 |
+  |--------------------→|------ Unmount -------------------------→|                 |
   |                     |                    |←- DeregisterSession|                 |
-  |←-- unmounted -------|←-- ok -------------------------------------|                 |
+  |←-- unmounted -------|←-- ok ----------------------------------|                 |
 ```
 
 ### Key Design Decisions

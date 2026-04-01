@@ -50,11 +50,11 @@ Agent Host                              Controller Host
 │       │              │               │  ┌──────┐ ┌───────┐ │
 │       │ gRPC         │               │  │ gRPC │ │SQLite │ │
 │       ▼              │               │  └──┬───┘ └───────┘ │
-│  afs-fuse ◄──────────────── gRPC ────────▶│               │
+│  afs-fuse ◄───────────────── gRPC ────────▶│               │
 │       │              │               └─────────────────────┘
 │  FUSE mount          │
 │       ▼              │
-│  /mnt/afs/<id>     │
+│  /mnt/afs/<id>       │
 │       │              │
 │  StorageBackend      │
 │  (local / NFS)       │
