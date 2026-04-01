@@ -10,7 +10,14 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 STORAGE_BASE="/mnt/nfs-test"
 source "$SCRIPT_DIR/e2e-lib.sh"
 
-trap 'cleanup' EXIT
+nfs_cleanup() {
+    cleanup
+    # Kill NFS daemons started by setup-nfs.sh
+    umount /mnt/nfs-test 2>/dev/null || true
+    killall ganesha.nfsd 2>/dev/null || true
+    killall rpcbind 2>/dev/null || true
+}
+trap 'nfs_cleanup' EXIT
 
 start_services
 
