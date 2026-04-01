@@ -12,8 +12,10 @@ NFS_MOUNT="/mnt/nfs-test"
 echo "══ NFS Server Setup ══"
 echo ""
 
-# Create export directory
+# Create export directory on tmpfs (overlayfs doesn't support name_to_handle_at
+# which ganesha's VFS FSAL requires)
 mkdir -p "$NFS_EXPORT"
+mount -t tmpfs tmpfs "$NFS_EXPORT"
 chmod 777 "$NFS_EXPORT"
 
 # Write ganesha config — export at NFSv4 pseudo root
